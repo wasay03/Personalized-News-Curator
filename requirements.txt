@@ -1,0 +1,14 @@
+feedparser 
+mysql-connector-python 
+requests 
+textstat 
+nltk 
+certifi
+flask 
+pandas
+numpy 
+scikit-learn 
+transformers 
+spacy 
+requests 
+beautifulsoup4 

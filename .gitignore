@@ -1,0 +1,4 @@
+.env
+/news_curator_env/Lib/
+/news_curator_env/Scripts/
+news_curator_env/pyvenv.cfg
