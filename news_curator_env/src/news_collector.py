@@ -11,13 +11,12 @@ import requests
 from datetime import datetime, timezone
 import time
 import logging
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import re
 from urllib.parse import urljoin, urlparse
 import hashlib
 import json
 from dataclasses import dataclass
-from textstat import flesch_reading_ease
 import nltk
 from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.corpus import stopwords
@@ -148,6 +147,10 @@ class NewsCollector:
             message: Log message
             details: Optional additional details as JSON
         """
+        if not self.cursor or not self.connection:
+            self.logger.error("Database connection not established")
+            return
+            
         try:
             query = """
             INSERT INTO system_logs (log_level, component, message, details, created_at)
@@ -166,6 +169,10 @@ class NewsCollector:
         Returns:
             List of NewsSource objects
         """
+        if not self.cursor:
+            self.logger.error("Database connection not established")
+            return []
+            
         try:
             query = """
             SELECT id, source_name, source_url, rss_feed, credibility_rating, 
@@ -179,15 +186,19 @@ class NewsCollector:
             
             sources = []
             for row in results:
-                sources.append(NewsSource(
-                    id=row['id'],
-                    source_name=row['source_name'],
-                    source_url=row['source_url'],
-                    rss_feed=row['rss_feed'],
-                    credibility_rating=float(row['credibility_rating']),
-                    source_type=row['source_type'],
-                    crawl_frequency_hours=row['crawl_frequency_hours']
-                ))
+                try:
+                    sources.append(NewsSource(
+                        id=int(row['id']) if row['id'] is not None else 0,  # type: ignore
+                        source_name=str(row['source_name']) if row['source_name'] is not None else '',  # type: ignore
+                        source_url=str(row['source_url']) if row['source_url'] is not None else '',  # type: ignore
+                        rss_feed=str(row['rss_feed']) if row['rss_feed'] is not None else '',  # type: ignore
+                        credibility_rating=float(row['credibility_rating']) if row['credibility_rating'] is not None else 0.0,  # type: ignore
+                        source_type=str(row['source_type']) if row['source_type'] is not None else '',  # type: ignore
+                        crawl_frequency_hours=int(row['crawl_frequency_hours']) if row['crawl_frequency_hours'] is not None else 24  # type: ignore
+                    ))
+                except (ValueError, TypeError) as e:
+                    self.logger.error(f"Failed to parse source row: {e}")
+                    continue
             
             self.logger.info(f"Retrieved {len(sources)} active RSS sources")
             return sources
@@ -206,6 +217,10 @@ class NewsCollector:
         Returns:
             bool: True if source should be crawled
         """
+        if not self.cursor:
+            self.logger.error("Database connection not established")
+            return True
+            
         try:
             query = "SELECT last_crawled FROM news_sources WHERE id = %s"
             self.cursor.execute(query, (source.id,))
@@ -215,7 +230,11 @@ class NewsCollector:
                 return True
             
             last_crawled = result['last_crawled']
-            hours_since_crawl = (datetime.now() - last_crawled).total_seconds() / 3600
+            if isinstance(last_crawled, datetime):
+                hours_since_crawl = (datetime.now() - last_crawled).total_seconds() / 3600
+            else:
+                # Handle case where last_crawled might be a string or other type
+                return True
             
             return hours_since_crawl >= source.crawl_frequency_hours
             
@@ -230,6 +249,10 @@ class NewsCollector:
         Args:
             source_id: Source ID to update
         """
+        if not self.cursor or not self.connection:
+            self.logger.error("Database connection not established")
+            return
+            
         try:
             query = "UPDATE news_sources SET last_crawled = %s WHERE id = %s"
             self.cursor.execute(query, (datetime.now(), source_id))
@@ -352,7 +375,7 @@ class NewsCollector:
         
         # Return category with highest score, or 'general' if no matches
         if category_scores:
-            return max(category_scores, key=category_scores.get)
+            return max(category_scores, key=lambda k: category_scores[k])
         return 'general'
     
     def generate_summary(self, content: str, max_sentences: int = 3) -> str:
@@ -411,6 +434,9 @@ class NewsCollector:
         if not text:
             return ""
         
+        # Convert to string if needed
+        text = str(text)
+        
         # Remove HTML tags
         text = re.sub(r'<[^>]+>', '', text)
         
@@ -432,6 +458,10 @@ class NewsCollector:
         Returns:
             True if article exists, False otherwise
         """
+        if not self.cursor:
+            self.logger.error("Database connection not established")
+            return False
+            
         try:
             query = "SELECT id FROM articles WHERE url = %s"
             self.cursor.execute(query, (url,))
@@ -467,28 +497,43 @@ class NewsCollector:
             content = self.clean_text(content)
             
             # Extract URL
-            url = entry.get('link', '')
+            url = str(entry.get('link', ''))
             if not url:
                 return None
             
             # Parse published date
             published_at = None
             if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                published_at = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                try:
+                    parsed_time = entry.published_parsed
+                    if hasattr(parsed_time, '__getitem__'):
+                        published_at = datetime(*parsed_time[:6], tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    pass
             elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                published_at = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
+                try:
+                    parsed_time = entry.updated_parsed
+                    if hasattr(parsed_time, '__getitem__'):
+                        published_at = datetime(*parsed_time[:6], tzinfo=timezone.utc)
+                except (TypeError, ValueError):
+                    pass
             
             # Extract author
             author = entry.get('author', None)
+            if author:
+                if isinstance(author, list):
+                    author = str(author[0]) if author else None
+                else:
+                    author = str(author)
             
             # Extract image URL
             image_url = None
             if hasattr(entry, 'media_content') and entry.media_content:
-                image_url = entry.media_content[0].get('url')
+                image_url = str(entry.media_content[0].get('url', ''))
             elif hasattr(entry, 'enclosures') and entry.enclosures:
                 for enclosure in entry.enclosures:
-                    if enclosure.type.startswith('image/'):
-                        image_url = enclosure.href
+                    if hasattr(enclosure, 'type') and str(enclosure.type).startswith('image/'):
+                        image_url = str(enclosure.href)
                         break
             
             # Calculate word count
@@ -536,6 +581,10 @@ class NewsCollector:
         Returns:
             True if saved successfully, False otherwise
         """
+        if not self.cursor or not self.connection:
+            self.logger.error("Database connection not established")
+            return False
+            
         try:
             # Check if article already exists
             if self.article_exists(article.url):
@@ -583,7 +632,8 @@ class NewsCollector:
             
         except Error as e:
             self.logger.error(f"Failed to save article: {e}")
-            self.connection.rollback()
+            if self.connection:
+                self.connection.rollback()
             return False
     
     def process_source(self, source: NewsSource) -> Tuple[int, int]:
