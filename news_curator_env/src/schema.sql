@@ -1,4 +1,5 @@
 -- Complete MySQL Schema for News Curator with Optimized Indexes
+-- FIXED VERSION - Resolves VARCHAR key length issues
 -- Run this script after creating your database
 
 -- Create database (run separately if needed)
@@ -6,13 +7,33 @@
 -- USE news_curator;
 
 -- =====================================================
+-- DROP ALL TABLES (in correct order due to foreign keys)
+-- =====================================================
+DROP VIEW IF EXISTS recent_articles_with_stats;
+DROP VIEW IF EXISTS user_engagement_summary;
+
+DROP PROCEDURE IF EXISTS UpdateArticleStats;
+DROP PROCEDURE IF EXISTS CleanOldData;
+
+DROP TABLE IF EXISTS system_logs;
+DROP TABLE IF EXISTS search_queries;
+DROP TABLE IF EXISTS trending_topics;
+DROP TABLE IF EXISTS article_categories;
+DROP TABLE IF EXISTS user_preferences_summary;
+DROP TABLE IF EXISTS user_interactions;
+DROP TABLE IF EXISTS article_chunks;
+DROP TABLE IF EXISTS articles;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS news_sources;
+
+-- =====================================================
 -- 1. NEWS SOURCES TABLE
 -- =====================================================
 CREATE TABLE news_sources (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     source_name VARCHAR(255) UNIQUE NOT NULL,
-    source_url VARCHAR(2048),
-    rss_feed VARCHAR(2048),
+    source_url VARCHAR(768), -- Reduced from 2048
+    rss_feed VARCHAR(768), -- Reduced from 2048
     credibility_rating DECIMAL(3,2) DEFAULT 0.50,
     last_crawled TIMESTAMP NULL,
     is_active BOOLEAN DEFAULT TRUE,
@@ -56,7 +77,7 @@ CREATE TABLE articles (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     title TEXT NOT NULL,
     content LONGTEXT,
-    url VARCHAR(2048) UNIQUE NOT NULL,
+    url VARCHAR(768) UNIQUE NOT NULL, -- Reduced from 2048
     source VARCHAR(255) NOT NULL,
     published_at DATETIME NULL,
     category VARCHAR(100) DEFAULT 'general',
@@ -64,7 +85,7 @@ CREATE TABLE articles (
     credibility_score DECIMAL(3,2) NULL,
     summary TEXT,
     entities JSON,
-    image_url VARCHAR(2048),
+    image_url VARCHAR(768), -- Reduced from 2048
     author VARCHAR(255),
     word_count INT,
     reading_time INT, -- estimated reading time in minutes
@@ -135,7 +156,7 @@ CREATE TABLE user_interactions (
     article_id BIGINT NOT NULL,
     interaction_type ENUM('click', 'like', 'share', 'skip', 'dislike', 'save', 'read_time') NOT NULL,
     interaction_data JSON,
-    session_id VARCHAR(255),
+    session_id VARCHAR(128), -- Reduced from 255 for efficiency
     ip_address VARCHAR(45),
     user_agent TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -243,7 +264,7 @@ CREATE TABLE search_queries (
     query_type ENUM('search', 'rag_question', 'filter') DEFAULT 'search',
     filters_applied JSON,
     execution_time_ms INT,
-    session_id VARCHAR(255),
+    session_id VARCHAR(128), -- Reduced from 255 for efficiency
     ip_address VARCHAR(45),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
@@ -270,7 +291,7 @@ CREATE TABLE system_logs (
     message TEXT NOT NULL,
     details JSON,
     user_id BIGINT NULL,
-    session_id VARCHAR(255),
+    session_id VARCHAR(128), -- Reduced from 255 for efficiency
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
     -- Foreign key
@@ -303,7 +324,7 @@ INSERT INTO article_categories (category_name, category_description, sort_order)
 ('world', 'International News', 9),
 ('local', 'Local News', 10);
 
--- Insert sample news sources
+-- Insert sample news sources (with shortened URLs)
 INSERT INTO news_sources (source_name, source_url, rss_feed, credibility_rating, source_type) VALUES
 ('BBC News', 'https://www.bbc.com/news', 'http://feeds.bbci.co.uk/news/rss.xml', 0.95, 'rss'),
 ('Reuters', 'https://www.reuters.com', 'http://feeds.reuters.com/reuters/topNews', 0.98, 'rss'),
@@ -395,6 +416,19 @@ DELIMITER ;
 -- INDEXES OPTIMIZATION NOTES
 -- =====================================================
 /*
+Key Changes Made to Fix VARCHAR Length Issues:
+
+1. articles.url: VARCHAR(2048) → VARCHAR(768)
+2. articles.image_url: VARCHAR(2048) → VARCHAR(768)
+3. news_sources.source_url: VARCHAR(2048) → VARCHAR(768)
+4. news_sources.rss_feed: VARCHAR(2048) → VARCHAR(768)
+5. session_id fields: VARCHAR(255) → VARCHAR(128) (for efficiency)
+
+VARCHAR Length Calculations for utf8mb4:
+- VARCHAR(768) × 4 bytes = 3072 bytes (maximum key length)
+- VARCHAR(255) × 4 bytes = 1020 bytes (safe for most cases)
+- VARCHAR(128) × 4 bytes = 512 bytes (very safe)
+
 Performance Tips:
 
 1. FULLTEXT indexes are great for search but can slow down inserts
@@ -413,4 +447,16 @@ ALTER TABLE articles PARTITION BY RANGE (YEAR(created_at)) (
     PARTITION p2024 VALUES LESS THAN (2025),
     PARTITION p2025 VALUES LESS THAN (2026)
 );
+
+Alternative Solutions for Long URLs:
+If you need URLs longer than 768 characters, consider:
+
+1. Hash-based uniqueness:
+ALTER TABLE articles ADD COLUMN url_hash CHAR(64) UNIQUE;
+ALTER TABLE articles MODIFY COLUMN url TEXT;
+
+2. Prefix indexing:
+CREATE UNIQUE INDEX idx_url_prefix ON articles (url(768));
+
+3. Separate URL table for normalization
 */

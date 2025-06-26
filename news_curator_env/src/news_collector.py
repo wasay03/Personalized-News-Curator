@@ -37,15 +37,29 @@ try:
 except LookupError:
     nltk.download('stopwords')
 
-try:
-    nltk.data.find('taggers/averaged_perceptron_tagger')
-except LookupError:
-    nltk.download('averaged_perceptron_tagger')
 
-try:
-    nltk.data.find('chunkers/maxent_ne_chunker')
-except LookupError:
-    nltk.download('maxent_ne_chunker')
+# Try to download both possible versions
+resources_to_try = [
+    'averaged_perceptron_tagger',
+    'averaged_perceptron_tagger_eng'
+]
+
+for resource in resources_to_try:
+    try:
+        nltk.download(resource)
+        print(f"Successfully downloaded: {resource}")
+    except Exception as e:
+        print(f"Failed to download {resource}: {e}")
+
+# Try both versions of the NE chunker
+chunkers = ['maxent_ne_chunker', 'maxent_ne_chunker_tab']
+
+for chunker in chunkers:
+    try:
+        nltk.download(chunker)
+        print(f"Successfully downloaded: {chunker}")
+    except Exception as e:
+        print(f"Failed to download {chunker}: {e}")
 
 try:
     nltk.data.find('corpora/words')
@@ -742,7 +756,7 @@ def main():
         'host': 'localhost',
         'database': 'news_curator',
         'user': 'news_user',
-        'password': 'your_password',
+        'password': '1234',
         'charset': 'utf8mb4',
         'use_unicode': True,
         'autocommit': False
