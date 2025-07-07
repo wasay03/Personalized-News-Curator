@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-RSS News Collector for News Curator Database
-Fetches RSS feeds and populates the MySQL database with articles
+NewsAPI News Collector for News Curator Database
+Fetches news articles from NewsAPI and populates the MySQL database
 """
 
-import feedparser
 import mysql.connector
 from mysql.connector import Error
 import requests
@@ -25,6 +24,12 @@ from nltk.chunk import ne_chunk
 from nltk.tree import Tree
 import ssl
 import certifi
+from dateutil import parser as date_parser
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Download required NLTK data
 try:
@@ -36,7 +41,6 @@ try:
     nltk.data.find('corpora/stopwords')
 except LookupError:
     nltk.download('stopwords')
-
 
 # Try to download both possible versions
 resources_to_try = [
@@ -72,7 +76,7 @@ class NewsSource:
     id: int
     source_name: str
     source_url: str
-    rss_feed: str
+    newsapi_source_id: str  # Changed from rss_feed to newsapi_source_id
     credibility_rating: float
     source_type: str
     crawl_frequency_hours: int
@@ -93,17 +97,20 @@ class Article:
     word_count: int
     reading_time: int
 
-class NewsCollector:
-    """Main class for collecting news from RSS feeds"""
+class NewsAPICollector:
+    """Main class for collecting news from NewsAPI"""
     
-    def __init__(self, db_config: Dict[str, str]):
+    def __init__(self, db_config: Dict[str, str], newsapi_key: str):
         """
-        Initialize the NewsCollector
+        Initialize the NewsAPICollector
         
         Args:
             db_config: Database configuration dictionary
+            newsapi_key: NewsAPI key
         """
         self.db_config = db_config
+        self.newsapi_key = newsapi_key
+        self.newsapi_base_url = "https://newsapi.org/v2"
         self.connection = None
         self.cursor = None
         
@@ -124,7 +131,8 @@ class NewsCollector:
         # Request session for connection pooling
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (compatible; NewsCollector/1.0)'
+            'User-Agent': 'Mozilla/5.0 (compatible; NewsAPICollector/1.0)',
+            'X-API-Key': self.newsapi_key
         })
     
     def connect_to_database(self) -> bool:
@@ -188,11 +196,19 @@ class NewsCollector:
             return []
             
         try:
-            query = """
-            SELECT id, source_name, source_url, rss_feed, credibility_rating, 
-                   source_type, crawl_frequency_hours
+            # First, let's check what columns exist in the table
+            self.cursor.execute("DESCRIBE news_sources")
+            columns = [row['Field'] for row in self.cursor.fetchall()]
+            self.logger.info(f"Available columns in news_sources: {columns}")
+            
+            # Check if we have newsapi_source_id or rss_feed column
+            newsapi_column = 'newsapi_source_id' if 'newsapi_source_id' in columns else 'rss_feed'
+            
+            query = f"""
+            SELECT id, source_name, source_url, {newsapi_column} as newsapi_source_id, 
+                   credibility_rating, source_type, crawl_frequency_hours
             FROM news_sources 
-            WHERE is_active = TRUE AND source_type = 'rss'
+            WHERE is_active = TRUE AND source_type IN ('newsapi', 'api')
             ORDER BY credibility_rating DESC
             """
             self.cursor.execute(query)
@@ -202,19 +218,19 @@ class NewsCollector:
             for row in results:
                 try:
                     sources.append(NewsSource(
-                        id=int(row['id']) if row['id'] is not None else 0,  # type: ignore
-                        source_name=str(row['source_name']) if row['source_name'] is not None else '',  # type: ignore
-                        source_url=str(row['source_url']) if row['source_url'] is not None else '',  # type: ignore
-                        rss_feed=str(row['rss_feed']) if row['rss_feed'] is not None else '',  # type: ignore
-                        credibility_rating=float(row['credibility_rating']) if row['credibility_rating'] is not None else 0.0,  # type: ignore
-                        source_type=str(row['source_type']) if row['source_type'] is not None else '',  # type: ignore
-                        crawl_frequency_hours=int(row['crawl_frequency_hours']) if row['crawl_frequency_hours'] is not None else 24  # type: ignore
+                        id=int(row['id']) if row['id'] is not None else 0,
+                        source_name=str(row['source_name']) if row['source_name'] is not None else '',
+                        source_url=str(row['source_url']) if row['source_url'] is not None else '',
+                        newsapi_source_id=str(row['newsapi_source_id']) if row['newsapi_source_id'] is not None else '',
+                        credibility_rating=float(row['credibility_rating']) if row['credibility_rating'] is not None else 0.0,
+                        source_type=str(row['source_type']) if row['source_type'] is not None else '',
+                        crawl_frequency_hours=int(row['crawl_frequency_hours']) if row['crawl_frequency_hours'] is not None else 24
                     ))
                 except (ValueError, TypeError) as e:
                     self.logger.error(f"Failed to parse source row: {e}")
                     continue
             
-            self.logger.info(f"Retrieved {len(sources)} active RSS sources")
+            self.logger.info(f"Retrieved {len(sources)} active NewsAPI sources")
             return sources
             
         except Error as e:
@@ -247,7 +263,6 @@ class NewsCollector:
             if isinstance(last_crawled, datetime):
                 hours_since_crawl = (datetime.now() - last_crawled).total_seconds() / 3600
             else:
-                # Handle case where last_crawled might be a string or other type
                 return True
             
             return hours_since_crawl >= source.crawl_frequency_hours
@@ -274,33 +289,41 @@ class NewsCollector:
         except Error as e:
             self.logger.error(f"Failed to update crawl time for source {source_id}: {e}")
     
-    def fetch_rss_feed(self, rss_url: str) -> Optional[feedparser.FeedParserDict]:
+    def fetch_newsapi_articles(self, source_id: str, page_size: int = 100) -> Optional[Dict]:
         """
-        Fetch and parse RSS feed
+        Fetch articles from NewsAPI for a specific source
         
         Args:
-            rss_url: RSS feed URL
+            source_id: NewsAPI source ID
+            page_size: Number of articles to fetch (max 100)
             
         Returns:
-            Parsed feed data or None if failed
+            NewsAPI response data or None if failed
         """
         try:
-            response = self.session.get(rss_url, timeout=30)
+            url = f"{self.newsapi_base_url}/top-headlines"
+            params = {
+                'sources': source_id,
+                'pageSize': min(page_size, 100),  # NewsAPI max is 100
+                'apiKey': self.newsapi_key
+            }
+            
+            response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
             
-            # Parse the feed
-            feed = feedparser.parse(response.content)
+            data = response.json()
             
-            if feed.bozo and feed.bozo_exception:
-                self.logger.warning(f"RSS feed has issues: {feed.bozo_exception}")
+            if data.get('status') != 'ok':
+                self.logger.error(f"NewsAPI error: {data.get('message', 'Unknown error')}")
+                return None
             
-            return feed
+            return data
             
         except requests.RequestException as e:
-            self.logger.error(f"Failed to fetch RSS feed {rss_url}: {e}")
+            self.logger.error(f"Failed to fetch NewsAPI articles for {source_id}: {e}")
             return None
-        except Exception as e:
-            self.logger.error(f"Failed to parse RSS feed {rss_url}: {e}")
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Failed to parse NewsAPI response: {e}")
             return None
     
     def extract_entities(self, text: str) -> Dict:
@@ -414,7 +437,6 @@ class NewsCollector:
                 return content
             
             # Simple heuristic: take first few sentences
-            # In a production system, you'd use more sophisticated summarization
             summary_sentences = sentences[:max_sentences]
             return ' '.join(summary_sentences)
             
@@ -484,71 +506,81 @@ class NewsCollector:
             self.logger.error(f"Failed to check article existence: {e}")
             return False
     
-    def parse_article_from_entry(self, entry: feedparser.FeedParserDict, source: NewsSource) -> Optional[Article]:
+    def parse_article_from_newsapi(self, article_data: Dict, source: NewsSource) -> Optional[Article]:
         """
-        Parse article data from RSS entry
+        Parse article data from NewsAPI response
         
         Args:
-            entry: RSS feed entry
+            article_data: NewsAPI article data
             source: NewsSource object
             
         Returns:
             Article object or None if parsing failed
         """
         try:
+            # Log the raw article data for debugging
+            self.logger.debug(f"Raw article data: {json.dumps(article_data, indent=2)}")
+            
             # Extract basic information
-            title = self.clean_text(entry.get('title', ''))
+            title = self.clean_text(article_data.get('title', ''))
+            content = self.clean_text(article_data.get('content', ''))
+            description = self.clean_text(article_data.get('description', ''))
             
-            # Get content (try different fields)
-            content = ''
-            if hasattr(entry, 'content') and entry.content:
-                content = entry.content[0].value if isinstance(entry.content, list) else entry.content
-            elif hasattr(entry, 'summary'):
-                content = entry.summary
-            elif hasattr(entry, 'description'):
-                content = entry.description
-            
-            content = self.clean_text(content)
+            # Use description if content is truncated or missing
+            if not content or content.endswith('[+') or content.endswith('...'):
+                content = description
             
             # Extract URL
-            url = str(entry.get('link', ''))
+            url = article_data.get('url', '')
             if not url:
                 return None
             
             # Parse published date
             published_at = None
-            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+            if article_data.get('publishedAt'):
                 try:
-                    parsed_time = entry.published_parsed
-                    if hasattr(parsed_time, '__getitem__'):
-                        published_at = datetime(*parsed_time[:6], tzinfo=timezone.utc)
-                except (TypeError, ValueError):
-                    pass
-            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                try:
-                    parsed_time = entry.updated_parsed
-                    if hasattr(parsed_time, '__getitem__'):
-                        published_at = datetime(*parsed_time[:6], tzinfo=timezone.utc)
-                except (TypeError, ValueError):
-                    pass
+                    published_at = date_parser.parse(article_data['publishedAt'])
+                    if published_at.tzinfo is None:
+                        published_at = published_at.replace(tzinfo=timezone.utc)
+                except Exception as e:
+                    self.logger.warning(f"Failed to parse date: {e}")
             
-            # Extract author
-            author = entry.get('author', None)
-            if author:
-                if isinstance(author, list):
-                    author = str(author[0]) if author else None
-                else:
-                    author = str(author)
+            # Extract author - handle various formats
+            author = None
+            author_raw = article_data.get('author')
+            self.logger.debug(f"Raw author data: {author_raw}")
             
-            # Extract image URL
+            if author_raw:
+                if isinstance(author_raw, str):
+                    author = author_raw.strip()
+                    # Clean up common null-like values
+                    if author.lower() in ['null', 'none', '', 'unknown', 'n/a']:
+                        author = None
+                elif isinstance(author_raw, dict):
+                    # Some APIs return author as an object
+                    author = author_raw.get('name', '').strip()
+                elif isinstance(author_raw, list) and len(author_raw) > 0:
+                    # Some APIs return author as an array
+                    author = str(author_raw[0]).strip()
+            
+            # Extract image URL - handle various formats
             image_url = None
-            if hasattr(entry, 'media_content') and entry.media_content:
-                image_url = str(entry.media_content[0].get('url', ''))
-            elif hasattr(entry, 'enclosures') and entry.enclosures:
-                for enclosure in entry.enclosures:
-                    if hasattr(enclosure, 'type') and str(enclosure.type).startswith('image/'):
-                        image_url = str(enclosure.href)
-                        break
+            image_raw = article_data.get('urlToImage')
+            self.logger.debug(f"Raw image URL data: {image_raw}")
+            
+            if image_raw:
+                if isinstance(image_raw, str):
+                    image_url = image_raw.strip()
+                    # Clean up common null-like values and validate URL format
+                    if (image_url.lower() in ['null', 'none', '', 'n/a'] or 
+                        not image_url.startswith(('http://', 'https://'))):
+                        image_url = None
+                elif isinstance(image_raw, dict):
+                    # Some APIs return image as an object
+                    image_url = image_raw.get('url', '').strip()
+            
+            # Additional logging for debugging
+            self.logger.info(f"Extracted - Author: '{author}', Image URL: '{image_url}'")
             
             # Calculate word count
             word_count = len(word_tokenize(content)) if content else 0
@@ -581,7 +613,7 @@ class NewsCollector:
             )
             
         except Exception as e:
-            self.logger.error(f"Failed to parse article from entry: {e}")
+            self.logger.error(f"Failed to parse article from NewsAPI data: {e}")
             return None
     
     def save_article(self, article: Article, source: NewsSource) -> bool:
@@ -666,19 +698,20 @@ class NewsCollector:
         try:
             self.logger.info(f"Processing source: {source.source_name}")
             
-            # Fetch RSS feed
-            feed = self.fetch_rss_feed(source.rss_feed)
-            if not feed:
-                self.log_system_message('ERROR', 'news_collector', 
-                                      f'Failed to fetch RSS feed for {source.source_name}')
+            # Fetch articles from NewsAPI
+            response_data = self.fetch_newsapi_articles(source.newsapi_source_id)
+            if not response_data:
+                self.log_system_message('ERROR', 'newsapi_collector', 
+                                      f'Failed to fetch articles for {source.source_name}')
                 return articles_processed, articles_saved
             
-            # Process entries
-            for entry in feed.entries:
+            # Process articles
+            articles = response_data.get('articles', [])
+            for article_data in articles:
                 articles_processed += 1
                 
                 # Parse article
-                article = self.parse_article_from_entry(entry, source)
+                article = self.parse_article_from_newsapi(article_data, source)
                 if not article:
                     continue
                 
@@ -686,7 +719,7 @@ class NewsCollector:
                 if self.save_article(article, source):
                     articles_saved += 1
                 
-                # Small delay to be respectful
+                # Small delay to be respectful to the API
                 time.sleep(0.1)
             
             # Update source crawl time
@@ -694,31 +727,93 @@ class NewsCollector:
             
             self.logger.info(f"Processed {articles_processed} articles from {source.source_name}, saved {articles_saved}")
             
-            self.log_system_message('INFO', 'news_collector', 
+            self.log_system_message('INFO', 'newsapi_collector', 
                                   f'Processed source {source.source_name}',
                                   {'articles_processed': articles_processed, 'articles_saved': articles_saved})
             
         except Exception as e:
             self.logger.error(f"Error processing source {source.source_name}: {e}")
-            self.log_system_message('ERROR', 'news_collector', 
+            self.log_system_message('ERROR', 'newsapi_collector', 
                                   f'Error processing source {source.source_name}: {str(e)}')
         
         return articles_processed, articles_saved
+    
+    def get_available_sources(self) -> List[Dict]:
+        """
+        Get available sources from NewsAPI
+        
+        Returns:
+            List of available sources
+        """
+        try:
+            url = f"{self.newsapi_base_url}/sources"
+            params = {
+                'apiKey': self.newsapi_key
+            }
+            
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            if data.get('status') != 'ok':
+                self.logger.error(f"NewsAPI error: {data.get('message', 'Unknown error')}")
+                return []
+            
+            return data.get('sources', [])
+            
+        except Exception as e:
+            self.logger.error(f"Failed to fetch available sources: {e}")
+            return []
+    
+    def test_newsapi_response(self, source_id: str = "bbc-news") -> None:
+        """
+        Test method to see what NewsAPI actually returns
+        
+        Args:
+            source_id: NewsAPI source ID to test
+        """
+        try:
+            self.logger.info(f"Testing NewsAPI response for source: {source_id}")
+            response_data = self.fetch_newsapi_articles(source_id, page_size=3)
+            
+            if response_data and 'articles' in response_data:
+                self.logger.info(f"Total articles returned: {response_data.get('totalResults', 0)}")
+                
+                for i, article in enumerate(response_data['articles'][:3]):
+                    self.logger.info(f"\n--- Article {i+1} ---")
+                    self.logger.info(f"Title: {article.get('title', 'N/A')}")
+                    self.logger.info(f"Author: {article.get('author', 'N/A')} (Type: {type(article.get('author'))})")
+                    self.logger.info(f"Image URL: {article.get('urlToImage', 'N/A')} (Type: {type(article.get('urlToImage'))})")
+                    self.logger.info(f"Source: {article.get('source', {}).get('name', 'N/A')}")
+                    self.logger.info(f"Published: {article.get('publishedAt', 'N/A')}")
+                    self.logger.info(f"URL: {article.get('url', 'N/A')}")
+                    
+                    # Log the full article structure for debugging
+                    self.logger.debug(f"Full article data: {json.dumps(article, indent=2)}")
+            else:
+                self.logger.error("No articles returned from NewsAPI")
+                
+        except Exception as e:
+            self.logger.error(f"Error testing NewsAPI: {e}")
     
     def run_collection(self):
         """
         Main method to run the news collection process
         """
-        self.logger.info("Starting news collection process")
+        self.logger.info("Starting NewsAPI collection process")
         
         if not self.connect_to_database():
             return
         
         try:
+            # Test NewsAPI response first (uncomment for debugging)
+            # self.test_newsapi_response()
+            
             # Get active sources
             sources = self.get_active_sources()
             if not sources:
-                self.logger.warning("No active RSS sources found")
+                self.logger.warning("No active NewsAPI sources found")
                 return
             
             total_processed = 0
@@ -735,13 +830,13 @@ class NewsCollector:
             
             self.logger.info(f"Collection complete. Processed: {total_processed}, Saved: {total_saved}")
             
-            self.log_system_message('INFO', 'news_collector', 
-                                  'News collection completed',
+            self.log_system_message('INFO', 'newsapi_collector', 
+                                  'NewsAPI collection completed',
                                   {'total_processed': total_processed, 'total_saved': total_saved})
             
         except Exception as e:
             self.logger.error(f"Error during collection process: {e}")
-            self.log_system_message('ERROR', 'news_collector', 
+            self.log_system_message('ERROR', 'newsapi_collector', 
                                   f'Error during collection process: {str(e)}')
         
         finally:
@@ -751,6 +846,14 @@ def main():
     """
     Main function to run the news collector
     """
+    # Load API key from environment
+    NEWSAPI_KEY = os.getenv("NEWS_API_KEY")
+    
+    if not NEWSAPI_KEY:
+        print("Error: NEWS_API_KEY not found in environment variables")
+        print("Please make sure you have a .env file with NEWS_API_KEY=your_api_key")
+        return
+    
     # Database configuration
     db_config = {
         'host': 'localhost',
@@ -763,7 +866,7 @@ def main():
     }
     
     # Create and run collector
-    collector = NewsCollector(db_config)
+    collector = NewsAPICollector(db_config, NEWSAPI_KEY)
     collector.run_collection()
 
 if __name__ == "__main__":

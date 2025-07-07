@@ -118,6 +118,8 @@ CREATE TABLE articles (
     FULLTEXT idx_summary_fulltext (summary)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+ALTER TABLE news_sources ADD COLUMN newsapi_source_id VARCHAR(255);
+
 -- =====================================================
 -- 4. ARTICLE CHUNKS TABLE (For RAG system)
 -- =====================================================
@@ -332,7 +334,21 @@ INSERT INTO news_sources (source_name, source_url, rss_feed, credibility_rating,
 ('Associated Press', 'https://apnews.com', 'https://feeds.apnews.com/apnews/topnews', 0.92, 'rss'),
 ('NPR', 'https://www.npr.org', 'https://feeds.npr.org/1001/rss.xml', 0.90, 'rss'),
 ('The Guardian', 'https://www.theguardian.com', 'https://www.theguardian.com/world/rss', 0.88, 'rss'),
-('Al Jazeera', 'https://www.aljazeera.com', 'https://www.aljazeera.com/xml/rss/all.xml', 0.83, 'rss');
+('Al Jazeera', 'https://www.aljazeera.com', 'https://www.aljazeera.com/xml/rss/all.xml', 0.83, 'rss'),
+('New York Times', 'https://www.nytimes.com', 'https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml', 0.94, 'rss'),
+('Washington Post', 'https://www.washingtonpost.com', 'http://feeds.washingtonpost.com/rss/national', 0.91, 'rss'),
+('Bloomberg', 'https://www.bloomberg.com', 'https://www.bloomberg.com/feed/podcast/etf-report.xml', 0.89, 'rss'),
+('Financial Times', 'https://www.ft.com', 'https://www.ft.com/?format=rss', 0.90, 'rss'),
+('Politico', 'https://www.politico.com', 'https://www.politico.com/rss/politics08.xml', 0.84, 'rss'),
+('The Verge', 'https://www.theverge.com', 'https://www.theverge.com/rss/index.xml', 0.80, 'rss'),
+('TechCrunch', 'https://techcrunch.com', 'http://feeds.feedburner.com/TechCrunch/', 0.79, 'rss'),
+('Engadget', 'https://www.engadget.com', 'https://www.engadget.com/rss.xml', 0.77, 'rss'),
+('CBS News', 'https://www.cbsnews.com', 'https://www.cbsnews.com/latest/rss/main', 0.82, 'rss'),
+('ABC News', 'https://abcnews.go.com', 'https://abcnews.go.com/abcnews/topstories', 0.81, 'rss'),
+('Fox News', 'https://www.foxnews.com', 'http://feeds.foxnews.com/foxnews/latest', 0.75, 'rss'),
+('Time', 'https://time.com', 'https://time.com/feed/', 0.86, 'rss'),
+('USA Today', 'https://www.usatoday.com', 'http://rssfeeds.usatoday.com/usatoday-NewsTopStories', 0.82, 'rss');
+
 
 -- =====================================================
 -- USEFUL VIEWS FOR COMMON QUERIES

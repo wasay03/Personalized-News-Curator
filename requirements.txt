@@ -12,3 +12,7 @@ transformers
 spacy 
 requests 
 beautifulsoup4 
+python-dotenv 
+python-dateutil
+fastapi 
+uvicorn
